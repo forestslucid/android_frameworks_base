@@ -13736,10 +13736,10 @@ public class AudioService extends IAudioService.Stub
                 String action = intent.getAction();
                 String pkgName = intent.getData().getEncodedSchemeSpecificPart();
                 int uid = intent.getIntExtra(Intent.EXTRA_UID, Process.INVALID_UID);
-                Slog.d(TAG, "received " + action + " replacing: " +
-                    intent.getBooleanExtra(EXTRA_REPLACING, false) + " archival: " +
-                    intent.getBooleanExtra(EXTRA_ARCHIVAL, false) + " for package " +
-                    pkgName + " with uid " + uid);
+                Slog.d(TAG, "收到广播 " + action + " 替换安装: " +
+                    intent.getBooleanExtra(EXTRA_REPLACING, false) + " 归档: " +
+                    intent.getBooleanExtra(EXTRA_ARCHIVAL, false) + " 包名: " +
+                    pkgName + " uid: " + uid);
                 if (ACTION_PACKAGE_ADDED.equals(action)
                         || ACTION_PACKAGE_REPLACED.equals(action)) {
                     // ACTION_PACKAGE_ADDED 广播在 PackageManager 完成安装提交之后才发出，
@@ -13752,13 +13752,13 @@ public class AudioService extends IAudioService.Stub
                     // （重启后恢复正常是因为 generatePackageMap 会重建完整的全量快照）。
                     final PackageState pkgState = pmi.getPackageStateInternal(pkgName);
                     if (pkgState == null) {
-                        Slog.w(TAG, "onReceive: package state not found for " + pkgName
-                                + "; skipping audioserver package update");
+                        Slog.w(TAG, "onReceive: 未找到包 " + pkgName
+                                + " 的状态，跳过音频服务器包状态更新");
                         return;
                     }
                     final UidPackageState.PackageState ps = makePackageState(pkgState);
                     audioserverExecutor.execute(() ->
-                            provider.onModifyPackageState(uid, ps, false /* isRemoved */));
+                            provider.onModifyPackageState(uid, ps, false /* 非移除操作 */));
                 }
             }
         }, packageUpdateFilter, null, null); // 包状态在广播线程上同步获取，onModifyPackageState 分发至 executor
