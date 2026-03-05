@@ -13679,10 +13679,21 @@ public class AudioService extends IAudioService.Stub
      *       推送至刚启动的音频服务器。</li>
      *   <li>{@link Context#registerReceiverForAllUsers} —— 注册一个广播接收器，监听
      *       {@link Intent#ACTION_PACKAGE_ADDED} 和 {@link Intent#ACTION_PACKAGE_REPLACED}。
-     *       收到广播后，在 {@code audioserverExecutor} 上分发
-     *       {@link AudioServerPermissionProvider#onModifyPackageState}，将增量的包变更
-     *       转发至原生音频服务器，无需全量重同步。</li>
+     *       收到广播后，在广播线程上立即通过 {@link PackageManagerInternal#getPackageStateInternal}
+     *       获取包状态（此时 PM 已完成安装提交，不会返回 null），再将
+     *       {@link AudioServerPermissionProvider#onModifyPackageState} 分发到
+     *       {@code audioserverExecutor} 执行，将增量的包变更转发至原生音频服务器。</li>
      * </ol>
+     *
+     * <p><b>注意——SELinux 下首次安装 AudioTrack 失败的根因：</b>
+     * 若将 {@link PackageManagerInternal#getPackageStateInternal} 放在
+     * {@code audioserverExecutor} 的 lambda 内部调用，则存在竞态：lambda 执行时 PM
+     * 内部状态可能尚未就绪，导致返回 {@code null}，进而使 {@link #makePackageState}
+     * 抛出 {@link NullPointerException} 并被 executor 静默吞掉，原生音频服务器永远
+     * 不会收到新包的状态更新。在 SELinux 强制模式下，音频服务器对未知包拒绝建立
+     * AudioTrack，表现为应用首次安装后无法播放声音；重启后恢复正常是因为
+     * {@link #generatePackageMap} 在服务启动时重建了完整快照。修复方式：在广播线程
+     * 上提前获取包状态并做 {@code null} 检查，确保异常可见且不会静默丢失。
      *
      * @param context         system server 上下文，用于注册包变更广播接收器
      * @param audioPolicy     {@code IAudioPolicyService} 的门面对象；用于注册服务启动回调
@@ -13731,14 +13742,26 @@ public class AudioService extends IAudioService.Stub
                     pkgName + " with uid " + uid);
                 if (ACTION_PACKAGE_ADDED.equals(action)
                         || ACTION_PACKAGE_REPLACED.equals(action)) {
+                    // ACTION_PACKAGE_ADDED 广播在 PackageManager 完成安装提交之后才发出，
+                    // 因此在广播线程上调用 getPackageStateInternal 是安全的，可以确保
+                    // 获取到有效的包状态。若放在 audioserverExecutor 的 lambda 内部调用，
+                    // 则可能因 PM 内部状态尚未就绪而返回 null，导致 makePackageState(null)
+                    // 抛出 NullPointerException 并被 executor 静默吞掉，最终使得
+                    // onModifyPackageState 从未执行，原生音频服务器无从感知新安装的包。
+                    // 在 SELinux 开启的情况下，这会导致应用首次安装后 AudioTrack 建立失败
+                    // （重启后恢复正常是因为 generatePackageMap 会重建完整的全量快照）。
+                    final PackageState pkgState = pmi.getPackageStateInternal(pkgName);
+                    if (pkgState == null) {
+                        Slog.w(TAG, "onReceive: package state not found for " + pkgName
+                                + "; skipping audioserver package update");
+                        return;
+                    }
+                    final UidPackageState.PackageState ps = makePackageState(pkgState);
                     audioserverExecutor.execute(() ->
-                            provider.onModifyPackageState(
-                                uid,
-                                makePackageState(pmi.getPackageStateInternal(pkgName)),
-                                false /* isRemoved */));
+                            provider.onModifyPackageState(uid, ps, false /* isRemoved */));
                 }
             }
-        }, packageUpdateFilter, null, null); // main thread is fine, since dispatch on executor
+        }, packageUpdateFilter, null, null); // 包状态在广播线程上同步获取，onModifyPackageState 分发至 executor
         return provider;
     }
 
