@@ -13603,22 +13603,21 @@ public class AudioService extends IAudioService.Stub
             + MediaMetrics.SEPARATOR;
 
     /**
-     * Converts a {@link PackageState} into the AIDL-defined
-     * {@link UidPackageState.PackageState} used by the native audioserver.
+     * 将 {@link PackageState} 转换为原生音频服务器使用的 AIDL 定义的
+     * {@link UidPackageState.PackageState}。
      *
-     * <p><b>Called by:</b>
+     * <p><b>调用方：</b>
      * <ul>
-     *   <li>{@link #generatePackageMap} — applied as a mapping function over every installed
-     *       package during the initial bulk snapshot.</li>
-     *   <li>The {@link android.content.BroadcastReceiver} registered inside
-     *       {@link #initializeAudioServerPermissionProvider} — called on each
-     *       {@link Intent#ACTION_PACKAGE_ADDED} / {@link Intent#ACTION_PACKAGE_REPLACED} broadcast
-     *       to produce the updated state for a single package before handing it to
-     *       {@link AudioServerPermissionProvider#onModifyPackageState}.</li>
+     *   <li>{@link #generatePackageMap} —— 在初始全量快照阶段，作为映射函数应用于每个已安装的包。</li>
+     *   <li>在 {@link #initializeAudioServerPermissionProvider} 内部注册的
+     *       {@link android.content.BroadcastReceiver} —— 在每次收到
+     *       {@link Intent#ACTION_PACKAGE_ADDED} / {@link Intent#ACTION_PACKAGE_REPLACED}
+     *       广播时调用，将单个包的最新状态传递给
+     *       {@link AudioServerPermissionProvider#onModifyPackageState}。</li>
      * </ul>
      *
-     * @param p the system-server {@link PackageState} to convert
-     * @return the corresponding AIDL {@link UidPackageState.PackageState}
+     * @param p 待转换的 system server 侧 {@link PackageState}
+     * @return 对应的 AIDL {@link UidPackageState.PackageState}
      */
     @VisibleForTesting
     static UidPackageState.PackageState makePackageState(PackageState p) {
@@ -13630,18 +13629,16 @@ public class AudioService extends IAudioService.Stub
     }
 
     /**
-     * Aggregation operation on all package states: groups states by app-id and merges the packages
-     * per app-id into a {@code Map} keyed by package name.
+     * 对所有包状态进行聚合：按 app-id 分组，并将同一 app-id 下的包合并为以包名为键的 {@code Map}。
      *
-     * <p><b>Called by:</b> {@link #initializeAudioServerPermissionProvider} — invoked once during
-     * service construction to build the initial package-state snapshot that is passed to the
-     * {@link AudioServerPermissionProvider} constructor.
+     * <p><b>调用方：</b>{@link #initializeAudioServerPermissionProvider} —— 在服务构建期间调用一次，
+     * 用于生成传递给 {@link AudioServerPermissionProvider} 构造函数的初始包状态快照。
      *
-     * <p><b>Calls:</b> {@link #makePackageState} as the value-mapping function for each
-     * {@link PackageState} in the input collection.
+     * <p><b>内部调用：</b>对输入集合中的每个 {@link PackageState}，以 {@link #makePackageState}
+     * 作为值映射函数。
      *
-     * @param appInfos the flat collection of all installed {@link PackageState} objects
-     * @return a map from app-id to (packageName → {@link UidPackageState.PackageState})
+     * @param appInfos 所有已安装 {@link PackageState} 对象的扁平集合
+     * @return 从 app-id 到 (包名 → {@link UidPackageState.PackageState}) 的映射
      */
     @VisibleForTesting
     static Map<Integer, Map<String, UidPackageState.PackageState>> generatePackageMap(
@@ -13661,40 +13658,38 @@ public class AudioService extends IAudioService.Stub
     }
 
     /**
-     * Creates and initializes an {@link AudioServerPermissionProvider} which keeps native
-     * audioserver permission state in sync with the system server.
+     * 创建并初始化 {@link AudioServerPermissionProvider}，使原生音频服务器的权限状态与
+     * system server 保持同步。
      *
-     * <p><b>Called from:</b> {@link Lifecycle#Lifecycle(Context)}, during AudioService
-     * construction. The returned provider is passed directly to the
-     * {@link AudioService#AudioService AudioService constructor} and stored as
-     * {@link #mPermissionProvider}.
+     * <p><b>调用方：</b>{@link Lifecycle#Lifecycle(Context)} —— 在 AudioService 构建期间调用。
+     * 返回的 provider 直接传入
+     * {@link AudioService#AudioService AudioService 构造函数}，并保存为
+     * {@link #mPermissionProvider}。
      *
-     * <p><b>Calls made:</b>
+     * <p><b>内部调用：</b>
      * <ol>
-     *   <li>{@link #generatePackageMap} — builds the initial app-id → package-state map from a
-     *       {@link PackageManagerLocal} unfiltered snapshot.</li>
-     *   <li>{@link LocalServices#getService} for {@link UserManagerInternal} and
-     *       {@link PackageManagerInternal} — supplies user-id and per-package data needed by the
-     *       provider at runtime.</li>
-     *   <li>{@link AudioPolicyFacade#registerOnStartTask} — registers a one-shot callback that
-     *       fires each time the native audioserver (re-)starts. The callback calls
-     *       {@link AudioServerPermissionProvider#onServiceStart} with the
-     *       {@link com.android.media.permission.INativePermissionController} obtained from
-     *       {@link AudioPolicyFacade#getPermissionController}, pushing the full permission and
-     *       package state to the freshly started audioserver.</li>
-     *   <li>{@link Context#registerReceiverForAllUsers} — registers a broadcast receiver for
-     *       {@link Intent#ACTION_PACKAGE_ADDED} and {@link Intent#ACTION_PACKAGE_REPLACED}. On
-     *       receipt, dispatches {@link AudioServerPermissionProvider#onModifyPackageState} on the
-     *       {@code audioserverExecutor} so that incremental package changes are forwarded to the
-     *       native audioserver without a full resync.</li>
+     *   <li>{@link #generatePackageMap} —— 从 {@link PackageManagerLocal} 的无过滤快照中
+     *       构建初始的 app-id → 包状态映射。</li>
+     *   <li>{@link LocalServices#getService} 获取 {@link UserManagerInternal} 和
+     *       {@link PackageManagerInternal} —— 为 provider 在运行时提供用户 ID 与单包数据。</li>
+     *   <li>{@link AudioPolicyFacade#registerOnStartTask} —— 注册一个回调，每当原生音频服务器
+     *       （重新）启动时触发。该回调以 {@link AudioPolicyFacade#getPermissionController}
+     *       返回的 {@link com.android.media.permission.INativePermissionController} 为参数，
+     *       调用 {@link AudioServerPermissionProvider#onServiceStart}，将完整的权限与包状态
+     *       推送至刚启动的音频服务器。</li>
+     *   <li>{@link Context#registerReceiverForAllUsers} —— 注册一个广播接收器，监听
+     *       {@link Intent#ACTION_PACKAGE_ADDED} 和 {@link Intent#ACTION_PACKAGE_REPLACED}。
+     *       收到广播后，在 {@code audioserverExecutor} 上分发
+     *       {@link AudioServerPermissionProvider#onModifyPackageState}，将增量的包变更
+     *       转发至原生音频服务器，无需全量重同步。</li>
      * </ol>
      *
-     * @param context the system server context, used to register the package-change receiver
-     * @param audioPolicy facade to {@code IAudioPolicyService}; used to register the service-start
-     *                    callback and to retrieve the native permission controller
-     * @param audioserverExecutor single-thread executor dedicated to audioserver lifecycle tasks;
-     *                            package-change callbacks are dispatched on this executor
-     * @return the fully initialised {@link AudioServerPermissionProvider}
+     * @param context         system server 上下文，用于注册包变更广播接收器
+     * @param audioPolicy     {@code IAudioPolicyService} 的门面对象；用于注册服务启动回调
+     *                        以及获取原生权限控制器
+     * @param audioserverExecutor 专用于音频服务器生命周期任务的单线程执行器；
+     *                            包变更回调在此执行器上分发
+     * @return 已完全初始化的 {@link AudioServerPermissionProvider}
      */
     private static AudioServerPermissionProvider initializeAudioServerPermissionProvider(
             Context context, AudioPolicyFacade audioPolicy, Executor audioserverExecutor) {
