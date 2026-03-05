@@ -279,7 +279,7 @@ import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.UserManagerInternal;
 import com.android.server.pm.UserManagerInternal.UserRestrictionsListener;
 import com.android.server.pm.UserManagerService;
-import com.android.server.pm.permission.PermissionManagerServiceInternal;
+
 import com.android.server.pm.pkg.PackageState;
 import com.android.server.utils.EventLogger;
 import com.android.server.wm.ActivityTaskManagerInternal;
@@ -13602,8 +13602,23 @@ public class AudioService extends IAudioService.Stub
     private static final String mMetricsId = MediaMetrics.Name.AUDIO_SERVICE
             + MediaMetrics.SEPARATOR;
 
-    /*
-     * Create AIDL defined package state for audioserver
+    /**
+     * Converts a {@link PackageState} into the AIDL-defined
+     * {@link UidPackageState.PackageState} used by the native audioserver.
+     *
+     * <p><b>Called by:</b>
+     * <ul>
+     *   <li>{@link #generatePackageMap} — applied as a mapping function over every installed
+     *       package during the initial bulk snapshot.</li>
+     *   <li>The {@link android.content.BroadcastReceiver} registered inside
+     *       {@link #initializeAudioServerPermissionProvider} — called on each
+     *       {@link Intent#ACTION_PACKAGE_ADDED} / {@link Intent#ACTION_PACKAGE_REPLACED} broadcast
+     *       to produce the updated state for a single package before handing it to
+     *       {@link AudioServerPermissionProvider#onModifyPackageState}.</li>
+     * </ul>
+     *
+     * @param p the system-server {@link PackageState} to convert
+     * @return the corresponding AIDL {@link UidPackageState.PackageState}
      */
     @VisibleForTesting
     static UidPackageState.PackageState makePackageState(PackageState p) {
@@ -13615,8 +13630,18 @@ public class AudioService extends IAudioService.Stub
     }
 
     /**
-     * Aggregation operation on all package states list: groups by states by app-id and merges the
-     * packages per app-id into a Map keyed by the packageName.
+     * Aggregation operation on all package states: groups states by app-id and merges the packages
+     * per app-id into a {@code Map} keyed by package name.
+     *
+     * <p><b>Called by:</b> {@link #initializeAudioServerPermissionProvider} — invoked once during
+     * service construction to build the initial package-state snapshot that is passed to the
+     * {@link AudioServerPermissionProvider} constructor.
+     *
+     * <p><b>Calls:</b> {@link #makePackageState} as the value-mapping function for each
+     * {@link PackageState} in the input collection.
+     *
+     * @param appInfos the flat collection of all installed {@link PackageState} objects
+     * @return a map from app-id to (packageName → {@link UidPackageState.PackageState})
      */
     @VisibleForTesting
     static Map<Integer, Map<String, UidPackageState.PackageState>> generatePackageMap(
@@ -13635,6 +13660,42 @@ public class AudioService extends IAudioService.Stub
                                 /* downstream collector */ reducer));
     }
 
+    /**
+     * Creates and initializes an {@link AudioServerPermissionProvider} which keeps native
+     * audioserver permission state in sync with the system server.
+     *
+     * <p><b>Called from:</b> {@link Lifecycle#Lifecycle(Context)}, during AudioService
+     * construction. The returned provider is passed directly to the
+     * {@link AudioService#AudioService AudioService constructor} and stored as
+     * {@link #mPermissionProvider}.
+     *
+     * <p><b>Calls made:</b>
+     * <ol>
+     *   <li>{@link #generatePackageMap} — builds the initial app-id → package-state map from a
+     *       {@link PackageManagerLocal} unfiltered snapshot.</li>
+     *   <li>{@link LocalServices#getService} for {@link UserManagerInternal} and
+     *       {@link PackageManagerInternal} — supplies user-id and per-package data needed by the
+     *       provider at runtime.</li>
+     *   <li>{@link AudioPolicyFacade#registerOnStartTask} — registers a one-shot callback that
+     *       fires each time the native audioserver (re-)starts. The callback calls
+     *       {@link AudioServerPermissionProvider#onServiceStart} with the
+     *       {@link com.android.media.permission.INativePermissionController} obtained from
+     *       {@link AudioPolicyFacade#getPermissionController}, pushing the full permission and
+     *       package state to the freshly started audioserver.</li>
+     *   <li>{@link Context#registerReceiverForAllUsers} — registers a broadcast receiver for
+     *       {@link Intent#ACTION_PACKAGE_ADDED} and {@link Intent#ACTION_PACKAGE_REPLACED}. On
+     *       receipt, dispatches {@link AudioServerPermissionProvider#onModifyPackageState} on the
+     *       {@code audioserverExecutor} so that incremental package changes are forwarded to the
+     *       native audioserver without a full resync.</li>
+     * </ol>
+     *
+     * @param context the system server context, used to register the package-change receiver
+     * @param audioPolicy facade to {@code IAudioPolicyService}; used to register the service-start
+     *                    callback and to retrieve the native permission controller
+     * @param audioserverExecutor single-thread executor dedicated to audioserver lifecycle tasks;
+     *                            package-change callbacks are dispatched on this executor
+     * @return the fully initialised {@link AudioServerPermissionProvider}
+     */
     private static AudioServerPermissionProvider initializeAudioServerPermissionProvider(
             Context context, AudioPolicyFacade audioPolicy, Executor audioserverExecutor) {
         Map<Integer, Map<String, UidPackageState.PackageState>> packageStates = null;
@@ -13644,7 +13705,6 @@ public class AudioService extends IAudioService.Stub
             packageStates = generatePackageMap(snapshot.getPackageStates().values());
         }
         var umi = LocalServices.getService(UserManagerInternal.class);
-        var pmsi = LocalServices.getService(PermissionManagerServiceInternal.class);
         var pmi = LocalServices.getService(PackageManagerInternal.class);
 
         var provider = new AudioServerPermissionProvider(packageStates,
