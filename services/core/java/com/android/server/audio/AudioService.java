@@ -279,7 +279,7 @@ import com.android.server.pm.PackageManagerLocal;
 import com.android.server.pm.UserManagerInternal;
 import com.android.server.pm.UserManagerInternal.UserRestrictionsListener;
 import com.android.server.pm.UserManagerService;
-import com.android.server.pm.permission.PermissionManagerServiceInternal;
+
 import com.android.server.pm.pkg.PackageState;
 import com.android.server.utils.EventLogger;
 import com.android.server.wm.ActivityTaskManagerInternal;
@@ -13602,8 +13602,22 @@ public class AudioService extends IAudioService.Stub
     private static final String mMetricsId = MediaMetrics.Name.AUDIO_SERVICE
             + MediaMetrics.SEPARATOR;
 
-    /*
-     * Create AIDL defined package state for audioserver
+    /**
+     * 将 {@link PackageState} 转换为原生音频服务器使用的 AIDL 定义的
+     * {@link UidPackageState.PackageState}。
+     *
+     * <p><b>调用方：</b>
+     * <ul>
+     *   <li>{@link #generatePackageMap} —— 在初始全量快照阶段，作为映射函数应用于每个已安装的包。</li>
+     *   <li>在 {@link #initializeAudioServerPermissionProvider} 内部注册的
+     *       {@link android.content.BroadcastReceiver} —— 在每次收到
+     *       {@link Intent#ACTION_PACKAGE_ADDED} / {@link Intent#ACTION_PACKAGE_REPLACED}
+     *       广播时调用，将单个包的最新状态传递给
+     *       {@link AudioServerPermissionProvider#onModifyPackageState}。</li>
+     * </ul>
+     *
+     * @param p 待转换的 system server 侧 {@link PackageState}
+     * @return 对应的 AIDL {@link UidPackageState.PackageState}
      */
     @VisibleForTesting
     static UidPackageState.PackageState makePackageState(PackageState p) {
@@ -13615,8 +13629,16 @@ public class AudioService extends IAudioService.Stub
     }
 
     /**
-     * Aggregation operation on all package states list: groups by states by app-id and merges the
-     * packages per app-id into a Map keyed by the packageName.
+     * 对所有包状态进行聚合：按 app-id 分组，并将同一 app-id 下的包合并为以包名为键的 {@code Map}。
+     *
+     * <p><b>调用方：</b>{@link #initializeAudioServerPermissionProvider} —— 在服务构建期间调用一次，
+     * 用于生成传递给 {@link AudioServerPermissionProvider} 构造函数的初始包状态快照。
+     *
+     * <p><b>内部调用：</b>对输入集合中的每个 {@link PackageState}，以 {@link #makePackageState}
+     * 作为值映射函数。
+     *
+     * @param appInfos 所有已安装 {@link PackageState} 对象的扁平集合
+     * @return 从 app-id 到 (包名 → {@link UidPackageState.PackageState}) 的映射
      */
     @VisibleForTesting
     static Map<Integer, Map<String, UidPackageState.PackageState>> generatePackageMap(
@@ -13635,6 +13657,51 @@ public class AudioService extends IAudioService.Stub
                                 /* downstream collector */ reducer));
     }
 
+    /**
+     * 创建并初始化 {@link AudioServerPermissionProvider}，使原生音频服务器的权限状态与
+     * system server 保持同步。
+     *
+     * <p><b>调用方：</b>{@link Lifecycle#Lifecycle(Context)} —— 在 AudioService 构建期间调用。
+     * 返回的 provider 直接传入
+     * {@link AudioService#AudioService AudioService 构造函数}，并保存为
+     * {@link #mPermissionProvider}。
+     *
+     * <p><b>内部调用：</b>
+     * <ol>
+     *   <li>{@link #generatePackageMap} —— 从 {@link PackageManagerLocal} 的无过滤快照中
+     *       构建初始的 app-id → 包状态映射。</li>
+     *   <li>{@link LocalServices#getService} 获取 {@link UserManagerInternal} 和
+     *       {@link PackageManagerInternal} —— 为 provider 在运行时提供用户 ID 与单包数据。</li>
+     *   <li>{@link AudioPolicyFacade#registerOnStartTask} —— 注册一个回调，每当原生音频服务器
+     *       （重新）启动时触发。该回调以 {@link AudioPolicyFacade#getPermissionController}
+     *       返回的 {@link com.android.media.permission.INativePermissionController} 为参数，
+     *       调用 {@link AudioServerPermissionProvider#onServiceStart}，将完整的权限与包状态
+     *       推送至刚启动的音频服务器。</li>
+     *   <li>{@link Context#registerReceiverForAllUsers} —— 注册一个广播接收器，监听
+     *       {@link Intent#ACTION_PACKAGE_ADDED} 和 {@link Intent#ACTION_PACKAGE_REPLACED}。
+     *       收到广播后，在广播线程上立即通过 {@link PackageManagerInternal#getPackageStateInternal}
+     *       获取包状态（此时 PM 已完成安装提交，不会返回 null），再将
+     *       {@link AudioServerPermissionProvider#onModifyPackageState} 分发到
+     *       {@code audioserverExecutor} 执行，将增量的包变更转发至原生音频服务器。</li>
+     * </ol>
+     *
+     * <p><b>注意——SELinux 下首次安装 AudioTrack 失败的根因：</b>
+     * 若将 {@link PackageManagerInternal#getPackageStateInternal} 放在
+     * {@code audioserverExecutor} 的 lambda 内部调用，则存在竞态：lambda 执行时 PM
+     * 内部状态可能尚未就绪，导致返回 {@code null}，进而使 {@link #makePackageState}
+     * 抛出 {@link NullPointerException} 并被 executor 静默吞掉，原生音频服务器永远
+     * 不会收到新包的状态更新。在 SELinux 强制模式下，音频服务器对未知包拒绝建立
+     * AudioTrack，表现为应用首次安装后无法播放声音；重启后恢复正常是因为
+     * {@link #generatePackageMap} 在服务启动时重建了完整快照。修复方式：在广播线程
+     * 上提前获取包状态并做 {@code null} 检查，确保异常可见且不会静默丢失。
+     *
+     * @param context         system server 上下文，用于注册包变更广播接收器
+     * @param audioPolicy     {@code IAudioPolicyService} 的门面对象；用于注册服务启动回调
+     *                        以及获取原生权限控制器
+     * @param audioserverExecutor 专用于音频服务器生命周期任务的单线程执行器；
+     *                            包变更回调在此执行器上分发
+     * @return 已完全初始化的 {@link AudioServerPermissionProvider}
+     */
     private static AudioServerPermissionProvider initializeAudioServerPermissionProvider(
             Context context, AudioPolicyFacade audioPolicy, Executor audioserverExecutor) {
         Map<Integer, Map<String, UidPackageState.PackageState>> packageStates = null;
@@ -13644,7 +13711,6 @@ public class AudioService extends IAudioService.Stub
             packageStates = generatePackageMap(snapshot.getPackageStates().values());
         }
         var umi = LocalServices.getService(UserManagerInternal.class);
-        var pmsi = LocalServices.getService(PermissionManagerServiceInternal.class);
         var pmi = LocalServices.getService(PackageManagerInternal.class);
 
         var provider = new AudioServerPermissionProvider(packageStates,
@@ -13670,20 +13736,32 @@ public class AudioService extends IAudioService.Stub
                 String action = intent.getAction();
                 String pkgName = intent.getData().getEncodedSchemeSpecificPart();
                 int uid = intent.getIntExtra(Intent.EXTRA_UID, Process.INVALID_UID);
-                Slog.d(TAG, "received " + action + " replacing: " +
-                    intent.getBooleanExtra(EXTRA_REPLACING, false) + " archival: " +
-                    intent.getBooleanExtra(EXTRA_ARCHIVAL, false) + " for package " +
-                    pkgName + " with uid " + uid);
+                Slog.d(TAG, "收到广播 " + action + " 替换安装: " +
+                    intent.getBooleanExtra(EXTRA_REPLACING, false) + " 归档: " +
+                    intent.getBooleanExtra(EXTRA_ARCHIVAL, false) + " 包名: " +
+                    pkgName + " uid: " + uid);
                 if (ACTION_PACKAGE_ADDED.equals(action)
                         || ACTION_PACKAGE_REPLACED.equals(action)) {
+                    // ACTION_PACKAGE_ADDED 广播在 PackageManager 完成安装提交之后才发出，
+                    // 因此在广播线程上调用 getPackageStateInternal 是安全的，可以确保
+                    // 获取到有效的包状态。若放在 audioserverExecutor 的 lambda 内部调用，
+                    // 则可能因 PM 内部状态尚未就绪而返回 null，导致 makePackageState(null)
+                    // 抛出 NullPointerException 并被 executor 静默吞掉，最终使得
+                    // onModifyPackageState 从未执行，原生音频服务器无从感知新安装的包。
+                    // 在 SELinux 开启的情况下，这会导致应用首次安装后 AudioTrack 建立失败
+                    // （重启后恢复正常是因为 generatePackageMap 会重建完整的全量快照）。
+                    final PackageState pkgState = pmi.getPackageStateInternal(pkgName);
+                    if (pkgState == null) {
+                        Slog.w(TAG, "onReceive: 未找到包 " + pkgName
+                                + " 的状态，跳过音频服务器包状态更新");
+                        return;
+                    }
+                    final UidPackageState.PackageState ps = makePackageState(pkgState);
                     audioserverExecutor.execute(() ->
-                            provider.onModifyPackageState(
-                                uid,
-                                makePackageState(pmi.getPackageStateInternal(pkgName)),
-                                false /* isRemoved */));
+                            provider.onModifyPackageState(uid, ps, false /* 非移除操作 */));
                 }
             }
-        }, packageUpdateFilter, null, null); // main thread is fine, since dispatch on executor
+        }, packageUpdateFilter, null, null); // 包状态在广播线程上同步获取，onModifyPackageState 分发至 executor
         return provider;
     }
 
